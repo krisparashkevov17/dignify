@@ -1,28 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
 
-// ─── EXTRACTION PROMPT CONSTANT ────────────────────────────────────────────
+// ─── SAMPLE CONTENT ──────────────────────────────────────────────────────
+// The sample report is precomputed so it renders instantly, costs nothing,
+// and works on deployments with no API key. It is labeled as a sample in the
+// UI. Live scoring goes through POST /api/analyze (see api/analyze.mjs).
 
-const EXTRACTION_PROMPT = `You are a cognitive analysis engine. Given a conversation transcript, extract:
-1. Critical thinking score (0-100): How much the user challenges, questions, and evaluates claims
-2. Depth score (0-100): How deeply the user engages with topics
-3. Engagement score (0-100): How actively the user participates in the conversation
-4. Flagged claims: List of significant claims made, each with risk level (high/medium/low) and a category tag
-5. Topics: Main subjects discussed
-6. Engagement signals: Behavioral patterns observed
-7. Summary: 2-3 sentence narrative of the cognitive patterns observed
-
-Return strict JSON matching the schema:
-{
-  "scores": { "criticalThinking": number, "depth": number, "engagement": number },
-  "claims": [{ "text": string, "risk": "high"|"medium"|"low", "tag": string }],
-  "topics": string[],
-  "engagementSignals": string[],
-  "summary": string
-}`;
-
-// ─── DEMO CONTENT ─────────────────────────────────────────────────────────
-
-const DEMO_CONVERSATION = [
+const SAMPLE_CONVERSATION = [
   "User: I've been reading that AI tools like ChatGPT are basically making us all smarter. Everyone's productivity is through the roof.",
   "",
   "Assistant: There are certainly productivity gains documented with AI tools, though the research is nuanced. Some studies show efficiency improvements, while others raise concerns about skill atrophy in certain domains.",
@@ -42,82 +25,98 @@ const DEMO_CONVERSATION = [
   "User: Okay that's helpful. I'm going to look into the productivity research more — what metrics actually matter when evaluating these claims?"
 ].join("\n");
 
-const DEMO_SESSIONS_SEED = [
+const SAMPLE_SESSION = {
+  id: 'session-sample',
+  timestamp: null, // stamped when loaded
+  source: 'manual',
+  conversation: 'AI productivity and health claims',
+  scores: { criticalThinking: 56, depth: 61, engagement: 78 },
+  offloadingRatio: 52,
+  claims: [
+    { text: 'AI tools are making everyone smarter and more productive', risk: 'medium', tag: 'ai/productivity' },
+    { text: 'Vitamin D supplements can cure depression', risk: 'high', tag: 'health' },
+    { text: 'The productivity data speaks for itself', risk: 'medium', tag: 'reasoning' },
+    { text: '5G conspiracy claims lack scientific basis', risk: 'low', tag: 'science' },
+  ],
+  topics: ['ai', 'productivity', 'health', 'supplements', '5g'],
+  engagementSignals: [
+    'Asks clarifying follow-up questions',
+    'Seeks explanation of mechanisms',
+    'Accepts health claims without requesting evidence',
+    'Appropriately doubts conspiracy content',
+    'Closes by requesting evaluation criteria',
+  ],
+  summary: 'Strong engagement with AI and productivity topics, with well-structured questions. Critical scrutiny drops around health claims, which are accepted at face value. Skepticism toward fringe science is well calibrated, and the session ends with a notably metacognitive request for evaluation criteria.',
+  rubricVersion: '1.0',
+};
+
+const SAMPLE_SESSIONS_SEED = [
   {
     id: 'seed-1',
     timestamp: new Date(Date.now() - 21 * 24 * 60 * 60 * 1000).toISOString(),
-    conversation: 'Discussion about nutrition myths and diet trends.',
+    conversation: 'Nutrition myths and diet trends',
     scores: { criticalThinking: 42, depth: 55, engagement: 71 },
+    offloadingRatio: 68,
     claims: [
       { text: 'Cutting carbs completely leads to faster weight loss', risk: 'high', tag: 'nutrition' },
       { text: 'Intermittent fasting has no downsides for everyone', risk: 'medium', tag: 'health' },
     ],
     topics: ['nutrition', 'diet', 'health'],
-    engagementSignals: ['accepts health claims without verification', 'enthusiastic tone', 'no source requests'],
-    summary: 'User shows high engagement with nutrition topics but accepts health claims with minimal skepticism. No requests for evidence or citations observed.',
+    engagementSignals: ['accepts health claims without verification', 'no source requests'],
+    summary: 'High engagement with nutrition topics but claims accepted with minimal skepticism.',
   },
   {
     id: 'seed-2',
     timestamp: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString(),
-    conversation: 'Discussion about AI productivity tools and automation trends.',
+    conversation: 'AI productivity tools and automation',
     scores: { criticalThinking: 58, depth: 67, engagement: 83 },
+    offloadingRatio: 55,
     claims: [
-      { text: 'AI will replace 80% of jobs within 5 years', risk: 'high', tag: 'AI/future' },
+      { text: 'AI will replace 80% of jobs within 5 years', risk: 'high', tag: 'ai/future' },
       { text: 'Automation always increases net efficiency', risk: 'medium', tag: 'productivity' },
     ],
-    topics: ['AI', 'productivity', 'automation', 'jobs'],
-    engagementSignals: ['asks clarifying questions', 'references external sources', 'challenges one claim'],
-    summary: 'Improving critical engagement with AI topics. User begins to probe assumptions but still accepts some sweeping generalisations without pushback.',
+    topics: ['ai', 'productivity', 'automation', 'jobs'],
+    engagementSignals: ['asks clarifying questions', 'references external sources'],
+    summary: 'Improving critical engagement; probes assumptions but accepts some generalisations.',
   },
   {
     id: 'seed-3',
     timestamp: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
-    conversation: 'Discussion about health supplements and wellness trends.',
+    conversation: 'Health supplements and wellness trends',
     scores: { criticalThinking: 51, depth: 61, engagement: 78 },
+    offloadingRatio: 60,
     claims: [
       { text: 'Natural supplements are always safer than pharmaceuticals', risk: 'high', tag: 'health' },
       { text: 'Natural remedies have no significant side effects', risk: 'high', tag: 'health' },
     ],
-    topics: ['health', 'supplements', 'wellness', 'nutrition'],
-    engagementSignals: ['asks for sources occasionally', 'expresses skepticism of one claim', 'accepts health generalisations'],
-    summary: 'Continued pattern of low skepticism toward health and supplement claims. Slight improvement in questioning wellness generalisations versus prior session.',
+    topics: ['health', 'supplements', 'wellness'],
+    engagementSignals: ['asks for sources occasionally', 'accepts health generalisations'],
+    summary: 'Continued low skepticism toward supplement claims; slight improvement in questioning.',
   },
 ];
 
-// ─── MOCK ANALYSIS ADAPTER ─────────────────────────────────────────────────
-// NOTE: Replace runMockAnalysis with a real API call to use EXTRACTION_PROMPT
-// against the Anthropic API. The result schema is identical.
+const MAX_TRANSCRIPT_CHARS = 24000;
+const MIN_TRANSCRIPT_CHARS = 80;
 
-function runMockAnalysis(conversation) {
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      const wordCount = conversation.split(/\s+/).length;
-      const questionCount = (conversation.match(/\?/g) || []).length;
-      const criticalThinking = Math.min(95, 45 + questionCount * 4 + (wordCount > 200 ? 12 : 0));
-      const depth = Math.min(95, 50 + (wordCount > 300 ? 15 : 5) + questionCount * 2);
-      const engagement = Math.min(95, 62 + (wordCount > 150 ? 14 : 0));
+// ─── API ─────────────────────────────────────────────────────────────────
 
-      resolve({
-        scores: { criticalThinking, depth, engagement },
-        claims: [
-          { text: 'AI tools are making everyone smarter and more productive', risk: 'medium', tag: 'AI/productivity' },
-          { text: 'Vitamin D supplements can cure depression', risk: 'high', tag: 'health' },
-          { text: 'The productivity data speaks for itself', risk: 'medium', tag: 'reasoning' },
-          { text: '5G conspiracy claims lack scientific basis', risk: 'low', tag: 'science' },
-        ],
-        topics: ['AI', 'productivity', 'health', 'supplements', 'skepticism', '5G'],
-        engagementSignals: [
-          'Asks clarifying follow-up questions (strong signal)',
-          'Seeks explanation of mechanisms',
-          'Low skepticism toward health supplement claims',
-          'Accepts productivity claims without requesting evidence',
-          'Appropriately doubts conspiracy content',
-          'Ends by requesting evaluative framework (positive)',
-        ],
-        summary: 'User demonstrates strong engagement with AI and productivity topics, forming well-structured questions. A recurring pattern of reduced critical scrutiny appears specifically around health and nutrition claims — these are accepted at face value without requesting evidence or qualification. Skepticism toward fringe science content is appropriately calibrated, and the session closes with a notably metacognitive request for evaluation criteria.',
-      });
-    }, 1300);
-  });
+async function analyzeTranscript(transcript) {
+  let resp;
+  try {
+    resp = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ transcript }),
+    });
+  } catch {
+    throw new Error('Could not reach the analyzer. If you are viewing a static build without a backend, use the sample report instead.');
+  }
+  let data = null;
+  try { data = await resp.json(); } catch { /* non-JSON error body */ }
+  if (!resp.ok) {
+    throw new Error((data && data.error) || `Scoring failed (HTTP ${resp.status}). Try again shortly.`);
+  }
+  return data.session;
 }
 
 // ─── STORAGE WRAPPER ──────────────────────────────────────────────────────
@@ -249,50 +248,69 @@ function generateFingerprint(profile) {
 
 // ─── COMPONENTS ──────────────────────────────────────────────────────────
 
-function CircularScore({ value, label, color }) {
-  const r = 36;
-  const circ = 2 * Math.PI * r;
-  const filled = circ * (Math.min(100, Math.max(0, value)) / 100);
+// The five bands of the rubric ladder (ICAP / SOLO / Bloom composite) that the
+// scoring actually uses — see skill/reference/scientific-basis.md.
+const BANDS = [
+  { max: 20, label: 'Passive' },
+  { max: 40, label: 'Active' },
+  { max: 60, label: 'Constructive' },
+  { max: 80, label: 'Relational' },
+  { max: 100, label: 'Interactive' },
+];
 
+function bandFor(value) {
+  return BANDS.find(b => value <= b.max) || BANDS[BANDS.length - 1];
+}
+
+// Signature element: a score shown as its position on the five-band rubric
+// ladder. Each cell fills to the extent the score covers it (2px gaps between
+// cells; monochrome fill).
+function BandGauge({ value, label, sublabel, showBand = true }) {
+  const v = Math.min(100, Math.max(0, value));
   return (
-    <div className="flex flex-col items-center gap-1">
-      <div className="relative w-24 h-24 flex items-center justify-center">
-        <svg width="96" height="96" className="absolute inset-0" style={{ transform: 'rotate(-90deg)' }}>
-          <circle cx="48" cy="48" r={r} fill="none" stroke="#1f2937" strokeWidth="8" />
-          <circle
-            cx="48" cy="48" r={r}
-            fill="none"
-            stroke={color}
-            strokeWidth="8"
-            strokeDasharray={`${filled} ${circ - filled}`}
-            strokeLinecap="round"
-            style={{ transition: 'stroke-dasharray 0.9s ease' }}
-          />
-        </svg>
-        <span className="relative z-10 text-2xl font-bold text-white">{value}</span>
+    <div>
+      <div className="flex items-baseline justify-between mb-2">
+        <span className="font-mono text-[11px] uppercase tracking-[0.15em] text-ink-2">{label}</span>
+        <span className="font-mono text-2xl font-semibold text-white tabular-nums">{v}</span>
       </div>
-      <span className="text-xs text-gray-500 uppercase tracking-widest">{label}</span>
+      <div className="flex gap-[2px]" role="img" aria-label={`${label}: ${v} out of 100`}>
+        {BANDS.map((b, i) => {
+          const lo = i * 20;
+          const fillPct = Math.min(1, Math.max(0, (v - lo) / 20));
+          return (
+            <div key={b.label} className="flex-1 h-2 bg-[#1c1c1c] overflow-hidden">
+              <div
+                className="h-full bg-white"
+                style={{ width: `${fillPct * 100}%`, transition: 'width 0.7s ease' }}
+              />
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-1.5 font-mono text-[10px] uppercase tracking-widest text-ink-3">
+        {showBand ? bandFor(v).label : sublabel}
+      </div>
     </div>
   );
 }
 
+// Risk is status information: encoded by treatment + icon + label, never color.
 const RISK_CFG = {
-  high:   { border: 'border-red-500/30',     bg: 'bg-red-500/8',     dot: 'bg-red-500',     badge: 'text-red-400',     label: 'HIGH RISK' },
-  medium: { border: 'border-yellow-500/30',  bg: 'bg-yellow-500/8',  dot: 'bg-yellow-400',  badge: 'text-yellow-400',  label: 'MEDIUM'    },
-  low:    { border: 'border-emerald-500/30', bg: 'bg-emerald-500/8', dot: 'bg-emerald-500', badge: 'text-emerald-400', label: 'VERIFIED'  },
+  high:   { icon: '▲', label: 'HIGH RISK', wrap: 'bg-white text-black border border-white',           tag: 'text-neutral-600' },
+  medium: { icon: '◆', label: 'MEDIUM',    wrap: 'bg-transparent text-neutral-200 border border-neutral-600', tag: 'text-ink-3' },
+  low:    { icon: '○', label: 'VERIFIED',  wrap: 'bg-transparent text-ink-3 border border-hairline',  tag: 'text-ink-3' },
 };
 
 function ClaimBadge({ claim }) {
   const cfg = RISK_CFG[claim.risk] || RISK_CFG.medium;
   return (
-    <div className={`border ${cfg.border} rounded-lg p-3 flex items-start gap-3`}
-         style={{ backgroundColor: 'rgba(255,255,255,0.02)' }}>
-      <span className={`w-2 h-2 rounded-full ${cfg.dot} mt-1.5 flex-shrink-0`} />
+    <div className={`${cfg.wrap} p-3 flex items-start gap-3`}>
+      <span className="font-mono text-[10px] mt-0.5 flex-shrink-0" aria-hidden="true">{cfg.icon}</span>
       <div className="flex-1 min-w-0">
-        <p className="text-sm text-gray-200 leading-snug">{claim.text}</p>
-        <div className="flex items-center gap-2 mt-1.5">
-          <span className={`text-xs font-mono font-semibold ${cfg.badge}`}>{cfg.label}</span>
-          <span className="text-xs text-gray-600">#{claim.tag}</span>
+        <p className="text-sm leading-snug">{claim.text}</p>
+        <div className="flex items-center gap-3 mt-1.5 font-mono text-[10px] uppercase tracking-widest">
+          <span className="font-semibold">{cfg.label}</span>
+          <span className={cfg.tag}>#{claim.tag}</span>
         </div>
       </div>
     </div>
@@ -302,15 +320,15 @@ function ClaimBadge({ claim }) {
 function TrendChart({ trend }) {
   if (!trend || trend.length < 2) {
     return (
-      <div className="h-36 flex items-center justify-center text-gray-600 text-sm">
-        Need at least 2 sessions for trend
+      <div className="h-36 flex items-center justify-center text-ink-3 text-sm">
+        Need at least 2 sessions for a trend
       </div>
     );
   }
 
   const W = 480;
-  const H = 120;
-  const PAD = { top: 10, right: 16, bottom: 24, left: 24 };
+  const H = 130;
+  const PAD = { top: 12, right: 110, bottom: 24, left: 28 };
   const innerW = W - PAD.left - PAD.right;
   const innerH = H - PAD.top - PAD.bottom;
 
@@ -324,40 +342,55 @@ function TrendChart({ trend }) {
   const pathFor = (key) =>
     trend.map((t, i) => `${i === 0 ? 'M' : 'L'}${xAt(i).toFixed(1)},${yAt(t[key]).toFixed(1)}`).join(' ');
 
+  const last = trend[trend.length - 1];
+
+  // Two series in monochrome: identity by line pattern (solid vs dashed) plus
+  // direct end labels — never color alone.
   return (
     <div className="w-full">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: '140px' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: '150px' }}>
         {[25, 50, 75].map(v => (
-          <line key={v}
-            x1={PAD.left} x2={W - PAD.right}
-            y1={yAt(v)} y2={yAt(v)}
-            stroke="#1f2937" strokeWidth="1" strokeDasharray="4 4" />
+          (v >= minV && v <= maxV) && (
+            <React.Fragment key={v}>
+              <line
+                x1={PAD.left} x2={W - PAD.right}
+                y1={yAt(v)} y2={yAt(v)}
+                stroke="#1c1c1c" strokeWidth="1" />
+              <text x={PAD.left - 6} y={yAt(v) + 3}
+                textAnchor="end" fill="#525252" fontSize="9" fontFamily="IBM Plex Mono, monospace">{v}</text>
+            </React.Fragment>
+          )
         ))}
-        {[25, 50, 75].map(v => (
-          <text key={`l${v}`} x={PAD.left - 4} y={yAt(v) + 4}
-            textAnchor="end" fill="#4b5563" fontSize="9">{v}</text>
-        ))}
-        <path d={pathFor('criticalThinking')} fill="none" stroke="#6366f1" strokeWidth="2.5"
+        <path d={pathFor('criticalThinking')} fill="none" stroke="#ffffff" strokeWidth="2"
           strokeLinecap="round" strokeLinejoin="round" />
-        <path d={pathFor('depth')} fill="none" stroke="#10b981" strokeWidth="2.5"
+        <path d={pathFor('depth')} fill="none" stroke="#8a8a8a" strokeWidth="2" strokeDasharray="5 4"
           strokeLinecap="round" strokeLinejoin="round" />
         {trend.map((t, i) => (
           <React.Fragment key={i}>
-            <circle cx={xAt(i)} cy={yAt(t.criticalThinking)} r="3.5" fill="#6366f1" />
-            <circle cx={xAt(i)} cy={yAt(t.depth)} r="3.5" fill="#10b981" />
-            <text x={xAt(i)} y={H - 4} textAnchor="middle" fill="#6b7280" fontSize="9">
+            <circle cx={xAt(i)} cy={yAt(t.criticalThinking)} r="3" fill="#ffffff">
+              <title>{`${t.date} — critical thinking ${t.criticalThinking}`}</title>
+            </circle>
+            <circle cx={xAt(i)} cy={yAt(t.depth)} r="3" fill="#0a0a0a" stroke="#8a8a8a" strokeWidth="1.5">
+              <title>{`${t.date} — depth ${t.depth}`}</title>
+            </circle>
+            <text x={xAt(i)} y={H - 6} textAnchor="middle" fill="#525252" fontSize="9"
+              fontFamily="IBM Plex Mono, monospace">
               {t.date}
             </text>
           </React.Fragment>
         ))}
+        <text x={W - PAD.right + 8} y={yAt(last.criticalThinking) + 3} fill="#ffffff" fontSize="9"
+          fontFamily="IBM Plex Mono, monospace">CRITICAL THINKING</text>
+        <text x={W - PAD.right + 8} y={yAt(last.depth) + 3} fill="#8a8a8a" fontSize="9"
+          fontFamily="IBM Plex Mono, monospace">DEPTH</text>
       </svg>
-      <div className="flex gap-5 mt-1">
-        <span className="flex items-center gap-1.5 text-xs text-gray-500">
-          <span className="w-4 h-0.5 bg-indigo-500 inline-block rounded" />
-          Critical Thinking
+      <div className="flex gap-6 mt-1 font-mono text-[10px] uppercase tracking-widest text-ink-3">
+        <span className="flex items-center gap-2">
+          <span className="w-5 border-t-2 border-white inline-block" />
+          Critical thinking
         </span>
-        <span className="flex items-center gap-1.5 text-xs text-gray-500">
-          <span className="w-4 h-0.5 bg-emerald-500 inline-block rounded" />
+        <span className="flex items-center gap-2">
+          <span className="w-5 border-t-2 border-dashed border-neutral-500 inline-block" />
           Depth
         </span>
       </div>
@@ -367,25 +400,25 @@ function TrendChart({ trend }) {
 
 function TopicMap({ topicFrequency }) {
   if (!topicFrequency || !Object.keys(topicFrequency).length) {
-    return <p className="text-gray-600 text-sm">No topics yet.</p>;
+    return <p className="text-ink-3 text-sm">No topics yet.</p>;
   }
   const sorted = Object.entries(topicFrequency).sort((a, b) => b[1] - a[1]);
   const maxCount = sorted[0][1];
 
-  const sizeClass = (count) => {
+  const cls = (count) => {
     const ratio = count / maxCount;
-    if (ratio > 0.75) return 'text-sm px-3 py-1.5 bg-indigo-500/20 border-indigo-500/40 text-indigo-300';
-    if (ratio > 0.4)  return 'text-xs px-2.5 py-1 bg-indigo-500/12 border-indigo-500/25 text-indigo-400';
-    return 'text-xs px-2 py-1 bg-gray-800 border-gray-700 text-gray-500';
+    if (ratio > 0.75) return 'border-white text-white';
+    if (ratio > 0.4)  return 'border-neutral-600 text-neutral-300';
+    return 'border-hairline text-ink-3';
   };
 
   return (
     <div className="flex flex-wrap gap-2">
       {sorted.map(([topic, count]) => (
         <span key={topic}
-          className={`border rounded-full font-mono ${sizeClass(count)} flex items-center gap-1`}>
+          className={`border font-mono text-xs px-2.5 py-1 ${cls(count)} flex items-center gap-1.5`}>
           {topic}
-          <span className="opacity-50 text-xs">{count}</span>
+          <span className="opacity-50">{count}</span>
         </span>
       ))}
     </div>
@@ -394,11 +427,23 @@ function TopicMap({ topicFrequency }) {
 
 function Spinner() {
   return (
-    <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+    <svg className="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24" aria-hidden="true">
       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
       <path className="opacity-75" fill="currentColor"
         d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
     </svg>
+  );
+}
+
+function SectionLabel({ children }) {
+  return (
+    <h2 className="font-mono text-[11px] uppercase tracking-[0.2em] text-ink-3 mb-4">{children}</h2>
+  );
+}
+
+function Panel({ children, className = '' }) {
+  return (
+    <div className={`border border-hairline bg-surface-2 p-5 ${className}`}>{children}</div>
   );
 }
 
@@ -407,13 +452,13 @@ function Spinner() {
 export default function App() {
   const [view, setView] = useState('home');
   const [conversation, setConversation] = useState('');
-  const [result, setResult] = useState(null);
+  const [result, setResult] = useState(null);       // a session object
+  const [isSample, setIsSample] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [storageWarn, setStorageWarn] = useState(false);
 
-  // Load persisted sessions on mount
   useEffect(() => {
     const stored = storageGet('sessions');
     if (stored && Array.isArray(stored)) setSessions(stored);
@@ -451,115 +496,97 @@ export default function App() {
         storageSet('sessions', imported);
         setError(null);
       } catch {
-        setError('Could not import profile — expected a Cognify profile.json file.');
+        setError('Could not import — expected a Cognify profile.json file (from ~/.cognify or a downloaded session).');
       }
     };
     reader.readAsText(file);
   }, []);
 
   const handleAnalyze = useCallback(async () => {
-    if (!conversation.trim()) return;
+    const transcript = conversation.trim();
+    if (!transcript) return;
+    if (transcript.length < MIN_TRANSCRIPT_CHARS) {
+      setError(`That's too short to score — paste at least ${MIN_TRANSCRIPT_CHARS} characters of conversation.`);
+      return;
+    }
     setLoading(true);
     setError(null);
     setResult(null);
+    setIsSample(false);
     try {
-      const analysisResult = await runMockAnalysis(conversation);
-      const session = {
-        id: `session-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        conversation,
-        scores: analysisResult.scores,
-        claims: analysisResult.claims,
-        topics: analysisResult.topics,
-        engagementSignals: analysisResult.engagementSignals,
-        summary: analysisResult.summary,
-      };
-      setResult(analysisResult);
+      const session = await analyzeTranscript(transcript);
+      setResult(session);
       persistSession(session);
     } catch (err) {
-      setError('Analysis failed. Please try again.');
+      setError(err.message);
     } finally {
       setLoading(false);
     }
   }, [conversation, persistSession]);
 
-  const handleDemo = useCallback(async () => {
-    setConversation(DEMO_CONVERSATION);
-    setLoading(true);
+  const handleSample = useCallback(() => {
+    setConversation(SAMPLE_CONVERSATION);
     setError(null);
-    setResult(null);
-
-    // Seed historical sessions
-    const newSessions = [...DEMO_SESSIONS_SEED];
-    storageSet('sessions', newSessions);
-    setSessions(newSessions);
-
-    try {
-      const analysisResult = await runMockAnalysis(DEMO_CONVERSATION);
-      const session = {
-        id: `session-demo-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        conversation: DEMO_CONVERSATION,
-        scores: analysisResult.scores,
-        claims: analysisResult.claims,
-        topics: analysisResult.topics,
-        engagementSignals: analysisResult.engagementSignals,
-        summary: analysisResult.summary,
-      };
-      const allSessions = [...newSessions, session];
-      storageSet('sessions', allSessions);
-      setSessions(allSessions);
-      const profile = aggregateProfile(allSessions);
-      if (profile) {
-        storageSet('profile', profile);
-        storageSet('fingerprint', generateFingerprint(profile));
-      }
-      setResult(analysisResult);
-    } catch (err) {
-      setError('Demo failed.');
-    } finally {
-      setLoading(false);
+    setLoading(false);
+    const session = { ...SAMPLE_SESSION, id: `session-sample-${Date.now()}`, timestamp: new Date().toISOString() };
+    const seeded = [...SAMPLE_SESSIONS_SEED, session];
+    storageSet('sessions', seeded);
+    setSessions(seeded);
+    const profile = aggregateProfile(seeded);
+    if (profile) {
+      storageSet('profile', profile);
+      storageSet('fingerprint', generateFingerprint(profile));
     }
+    setResult(session);
+    setIsSample(true);
   }, []);
+
+  const handleSampleFromHome = useCallback(() => {
+    setView('analyze');
+    setTimeout(() => handleSample(), 30);
+  }, [handleSample]);
+
+  const handleDownload = useCallback(() => {
+    if (!result) return;
+    const blob = new Blob([JSON.stringify({ version: 1, sessions: [result] }, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `cognify-${result.id}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [result]);
 
   const profile = aggregateProfile(sessions);
   const fingerprint = generateFingerprint(profile);
-
-  const handleDemoFromHome = useCallback(async () => {
-    setView('analyze');
-    setTimeout(() => handleDemo(), 50);
-  }, [handleDemo]);
+  const charCount = conversation.length;
+  const overLimit = charCount > MAX_TRANSCRIPT_CHARS;
 
   return (
-    <div className="min-h-screen bg-gray-950 text-gray-100">
+    <div className="min-h-screen bg-surface text-neutral-100">
       {storageWarn && (
-        <div className="bg-yellow-500/10 border-b border-yellow-500/20 px-4 py-2 text-xs text-yellow-400 text-center">
+        <div className="border-b border-hairline px-4 py-2 font-mono text-[11px] text-ink-2 text-center">
           Storage unavailable — session data is in-memory only and will not persist across reloads.
         </div>
       )}
 
       {/* Header */}
-      <header className="border-b border-gray-800 px-6 py-4 flex items-center justify-between sticky top-0 bg-gray-950/90 backdrop-blur-sm z-50">
-        <button onClick={() => setView('home')} className="flex items-center gap-3 hover:opacity-80 transition-opacity">
-          <div className="w-7 h-7 rounded-md bg-indigo-600 flex items-center justify-center">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <circle cx="7" cy="7" r="2.5" fill="white" />
-              <circle cx="7" cy="7" r="5.5" stroke="white" strokeWidth="1.2" fill="none" strokeDasharray="2 2" />
-            </svg>
-          </div>
-          <span className="font-semibold text-white tracking-tight">Cognify</span>
+      <header className="border-b border-hairline px-6 py-4 flex items-center justify-between sticky top-0 bg-surface/95 backdrop-blur-sm z-50">
+        <button onClick={() => setView('home')} className="flex items-center gap-3 hover:opacity-70 transition-opacity">
+          <span className="w-3 h-3 bg-white inline-block" aria-hidden="true" />
+          <span className="font-mono font-semibold tracking-[0.25em] text-sm text-white">COGNIFY</span>
         </button>
 
-        <nav className="flex items-center gap-1">
-          {['analyze', 'profile'].map(v => (
-            <button key={v}
-              onClick={() => setView(v)}
-              className={`px-4 py-1.5 rounded-md text-sm capitalize transition-colors ${
-                view === v
-                  ? 'bg-gray-800 text-white'
-                  : 'text-gray-500 hover:text-gray-300'
+        <nav className="flex items-center gap-1 font-mono text-xs uppercase tracking-widest">
+          {[['analyze', 'Score'], ['profile', 'Profile']].map(([key, label]) => (
+            <button key={key}
+              onClick={() => setView(key)}
+              className={`px-4 py-1.5 transition-colors ${
+                view === key
+                  ? 'bg-white text-black'
+                  : 'text-ink-3 hover:text-white'
               }`}>
-              {v}
+              {label}
             </button>
           ))}
         </nav>
@@ -571,133 +598,133 @@ export default function App() {
         {view === 'home' && (
           <div>
             {/* Hero */}
-            <div className="text-center pt-16 pb-20 relative">
-              <div className="absolute inset-0 -z-10 pointer-events-none"
-                style={{ background: 'radial-gradient(ellipse 60% 40% at 50% 0%, rgba(99,102,241,0.15) 0%, transparent 70%)' }} />
-              <div className="inline-flex items-center gap-2 border border-indigo-500/30 bg-indigo-500/10 rounded-full px-4 py-1.5 text-xs text-indigo-400 font-mono mb-8">
-                cognitive fitness tracker
-              </div>
-              <h1 className="text-5xl sm:text-6xl font-black text-white leading-tight tracking-tight mb-6">
-                Know how well<br />
-                <span className="text-indigo-400">you think.</span>
-              </h1>
-              <p className="text-xl text-gray-400 max-w-xl mx-auto leading-relaxed mb-10">
-                We built tools to track our steps. We built tools to track our sleep.<br />
-                <strong className="text-gray-200">Nobody built a tool to track cognitive fitness.</strong>
+            <div className="pt-20 pb-16 border-b border-hairline">
+              <p className="font-mono text-[11px] uppercase tracking-[0.25em] text-ink-3 mb-6">
+                Cognitive measurement · rubric v1.0
               </p>
-              <div className="flex items-center justify-center gap-4 flex-wrap">
-                <button
-                  onClick={handleDemoFromHome}
-                  className="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-8 py-3 rounded-xl text-sm transition-colors">
-                  Try Demo
-                </button>
+              <h1 className="font-display text-5xl sm:text-7xl font-bold text-white leading-[0.95] tracking-tight mb-8">
+                Your thinking,<br />measured.
+              </h1>
+              <p className="text-lg text-ink-2 max-w-xl leading-relaxed mb-10">
+                We track steps and sleep. Nothing tracks how you think with AI.
+                Cognify scores a conversation transcript against a rubric grounded in
+                cognitive science — in seconds, no sign-up.
+              </p>
+              <div className="flex items-center gap-3 flex-wrap">
                 <button
                   onClick={() => setView('analyze')}
-                  className="border border-gray-700 hover:border-gray-500 text-gray-300 hover:text-white px-8 py-3 rounded-xl text-sm transition-colors">
-                  Analyze a Conversation
+                  className="bg-white text-black hover:bg-neutral-200 font-mono text-xs uppercase tracking-widest font-semibold px-7 py-3.5 transition-colors">
+                  Score a transcript
+                </button>
+                <button
+                  onClick={handleSampleFromHome}
+                  className="border border-neutral-600 hover:border-white text-neutral-300 hover:text-white font-mono text-xs uppercase tracking-widest px-7 py-3.5 transition-colors">
+                  View sample report
                 </button>
               </div>
             </div>
 
-            {/* What we measure */}
-            <div className="mb-16">
-              <p className="text-xs text-gray-600 uppercase tracking-widest font-mono text-center mb-8">What Cognify measures</p>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                {[
-                  { score: 69, label: 'Critical Thinking', color: '#6366f1', ringColor: '#6366f1', desc: 'How much you challenge and evaluate claims rather than accepting them at face value.' },
-                  { score: 73, label: 'Depth', color: '#10b981', ringColor: '#10b981', desc: 'How substantively you explore topics — follow-up questions, nuance-seeking, mechanism-probing.' },
-                  { score: 85, label: 'Engagement', color: '#f59e0b', ringColor: '#f59e0b', desc: 'How actively you participate — response quality, contribution, topic coverage.' },
-                ].map(({ score, label, color, ringColor, desc }) => {
-                  const r = 36, circ = 2 * Math.PI * r, filled = circ * (score / 100);
-                  return (
-                    <div key={label} className="bg-gray-900 border border-gray-800 rounded-2xl p-6 text-center">
-                      <div className="relative w-24 h-24 mx-auto flex items-center justify-center mb-4">
-                        <svg width="96" height="96" className="absolute inset-0" style={{ transform: 'rotate(-90deg)' }}>
-                          <circle cx="48" cy="48" r={r} fill="none" stroke="#1f2937" strokeWidth="8" />
-                          <circle cx="48" cy="48" r={r} fill="none" stroke={ringColor} strokeWidth="8"
-                            strokeDasharray={`${filled} ${circ - filled}`} strokeLinecap="round" />
-                        </svg>
-                        <span className="relative z-10 text-2xl font-black" style={{ color }}>{score}</span>
-                      </div>
-                      <h3 className="text-sm font-semibold text-white mb-2">{label}</h3>
-                      <p className="text-xs text-gray-500 leading-relaxed">{desc}</p>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* How it works */}
-            <div className="mb-16">
-              <p className="text-xs text-gray-600 uppercase tracking-widest font-mono text-center mb-8">How it works</p>
-              <div className="relative">
-                <div className="absolute left-5 top-8 bottom-8 w-px bg-gray-800 hidden sm:block" />
-                <div className="space-y-4">
-                  {[
-                    { n: '01', title: 'Paste a conversation', body: 'Any conversation with an AI assistant — copy and paste the transcript into Cognify.' },
-                    { n: '02', title: 'Get your cognitive scores', body: 'Cognify analyses your critical thinking, depth, and engagement. Flagged claims are colour-coded by risk level — high, medium, or verified.' },
-                    { n: '03', title: 'Build your profile', body: 'Every session adds to your longitudinal profile. Blind spots emerge. A cognitive fingerprint — a plain-English narrative of your thinking habits — is generated over time.' },
-                  ].map(({ n, title, body }) => (
-                    <div key={n} className="flex items-start gap-5 bg-gray-900 border border-gray-800 rounded-2xl p-5">
-                      <span className="text-xs font-mono font-bold text-indigo-500 bg-indigo-500/10 border border-indigo-500/20 rounded-lg w-10 h-10 flex items-center justify-center flex-shrink-0">{n}</span>
-                      <div>
-                        <h3 className="text-sm font-semibold text-white mb-1">{title}</h3>
-                        <p className="text-sm text-gray-500 leading-relaxed">{body}</p>
-                      </div>
-                    </div>
-                  ))}
+            {/* What it measures — the real gauges */}
+            <div className="py-14 border-b border-hairline">
+              <SectionLabel>What it measures</SectionLabel>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-10 gap-y-8 mt-6">
+                <div>
+                  <BandGauge value={56} label="Critical thinking" />
+                  <p className="text-xs text-ink-3 leading-relaxed mt-2">
+                    Do you challenge and evaluate claims, or accept them at face value?
+                  </p>
+                </div>
+                <div>
+                  <BandGauge value={61} label="Depth" />
+                  <p className="text-xs text-ink-3 leading-relaxed mt-2">
+                    Isolated facts, or integrated reasoning that connects ideas?
+                  </p>
+                </div>
+                <div>
+                  <BandGauge value={78} label="Engagement" />
+                  <p className="text-xs text-ink-3 leading-relaxed mt-2">
+                    Restating what you're told, or building on and extending it?
+                  </p>
+                </div>
+                <div>
+                  <BandGauge value={52} label="Offloading ratio" showBand={false}
+                    sublabel="Signature metric — lower is healthier" />
+                  <p className="text-xs text-ink-3 leading-relaxed mt-2">
+                    How much of the cognitive work you delegate to the AI versus retain and verify.
+                  </p>
                 </div>
               </div>
-            </div>
-
-            {/* Fingerprint preview */}
-            <div className="mb-16 bg-gray-900 border border-indigo-500/20 rounded-2xl p-6">
-              <p className="text-xs text-indigo-400 uppercase tracking-widest font-mono mb-4">Sample cognitive fingerprint</p>
-              <p className="text-sm text-indigo-300/80 leading-relaxed italic">
-                "You engage most deeply with <strong className="text-indigo-200">AI, productivity, and health</strong> topics, where your critical thinking is most active. You show a recurring pattern of reduced scrutiny around <strong className="text-red-400">health claims</strong> — these are areas where epistemic vigilance may be worth consciously raising. Your skepticism is well-calibrated toward <strong className="text-emerald-400">science content</strong>. Your critical thinking trend is <strong className="text-indigo-200">improving</strong> — you ask better questions with each session."
+              <p className="font-mono text-[10px] uppercase tracking-widest text-ink-3 mt-8">
+                Scored on the five-band rubric ladder: Passive · Active · Constructive · Relational · Interactive
               </p>
             </div>
 
-            {/* Claim example */}
-            <div className="mb-16">
-              <p className="text-xs text-gray-600 uppercase tracking-widest font-mono text-center mb-8">Claim risk detection</p>
-              <div className="space-y-3">
+            {/* How it works — a real sequence */}
+            <div className="py-14 border-b border-hairline">
+              <SectionLabel>How it works</SectionLabel>
+              <div className="space-y-0 mt-2">
                 {[
-                  { risk: 'high', color: 'red', border: 'border-red-500/30', bg: 'bg-red-500/5', dot: 'bg-red-500', badge: 'text-red-400', label: 'HIGH RISK', text: '"Vitamin D supplements can cure depression"', tag: '#health' },
-                  { risk: 'medium', color: 'yellow', border: 'border-yellow-500/30', bg: 'bg-yellow-500/5', dot: 'bg-yellow-400', badge: 'text-yellow-400', label: 'MEDIUM', text: '"AI tools are making everyone smarter"', tag: '#AI/productivity' },
-                  { risk: 'low', color: 'emerald', border: 'border-emerald-500/30', bg: 'bg-emerald-500/5', dot: 'bg-emerald-500', badge: 'text-emerald-400', label: 'VERIFIED', text: '"5G conspiracy claims lack scientific basis"', tag: '#science' },
-                ].map(c => (
-                  <div key={c.label} className={`border ${c.border} ${c.bg} rounded-xl p-3 flex items-center gap-3`}>
-                    <span className={`w-2 h-2 rounded-full ${c.dot} flex-shrink-0`} />
-                    <span className={`text-xs font-mono font-bold ${c.badge} flex-shrink-0`}>{c.label}</span>
-                    <span className="text-sm text-gray-300 flex-1">{c.text}</span>
-                    <span className="text-xs text-gray-600 font-mono flex-shrink-0">{c.tag}</span>
+                  { n: '01', title: 'Paste a transcript', body: 'Any conversation with an AI assistant. It is scored, not stored.' },
+                  { n: '02', title: 'Read your report', body: 'Four scores on the rubric ladder, claims flagged by epistemic risk, and the behavioral signals behind them.' },
+                  { n: '03', title: 'Watch the pattern', body: 'Each report adds to a local profile: trends, blind spots, and a plain-English cognitive fingerprint.' },
+                ].map(({ n, title, body }, i) => (
+                  <div key={n} className={`flex items-start gap-6 py-5 ${i > 0 ? 'border-t border-hairline' : ''}`}>
+                    <span className="font-mono text-xs text-ink-3 pt-0.5 flex-shrink-0">{n}</span>
+                    <div>
+                      <h3 className="font-display text-base font-bold text-white mb-1">{title}</h3>
+                      <p className="text-sm text-ink-2 leading-relaxed">{body}</p>
+                    </div>
                   </div>
                 ))}
               </div>
             </div>
 
+            {/* Sample fingerprint */}
+            <div className="py-14 border-b border-hairline">
+              <SectionLabel>Specimen — cognitive fingerprint</SectionLabel>
+              <blockquote className="border-l-2 border-white pl-6 mt-6">
+                <p className="text-base text-neutral-200 leading-relaxed">
+                  "You engage most deeply with <strong>AI, productivity, and health</strong> topics.
+                  You show a recurring pattern of reduced scrutiny around <strong>health claims</strong> —
+                  areas where epistemic vigilance may be worth consciously raising. Your skepticism is
+                  well-calibrated toward <strong>science content</strong>, and your critical thinking
+                  trend is improving — you ask better questions with each session."
+                </p>
+              </blockquote>
+            </div>
+
+            {/* Claim risk sample */}
+            <div className="py-14 border-b border-hairline">
+              <SectionLabel>Claim risk detection</SectionLabel>
+              <div className="space-y-2 mt-6">
+                <ClaimBadge claim={{ text: 'Vitamin D supplements can cure depression', risk: 'high', tag: 'health' }} />
+                <ClaimBadge claim={{ text: 'AI tools are making everyone smarter', risk: 'medium', tag: 'ai/productivity' }} />
+                <ClaimBadge claim={{ text: '5G conspiracy claims lack scientific basis', risk: 'low', tag: 'science' }} />
+              </div>
+            </div>
+
             {/* Bottom CTA */}
-            <div className="text-center border-t border-gray-800 pt-16 pb-8">
-              <h2 className="text-2xl font-bold text-white mb-3">Ready to see your cognitive score?</h2>
-              <p className="text-gray-500 text-sm mb-8">Run the demo in under 30 seconds — no sign-up required.</p>
+            <div className="py-16 text-center">
+              <h2 className="font-display text-2xl font-bold text-white mb-3">See your score.</h2>
+              <p className="text-ink-2 text-sm mb-8">
+                Grounded in ICAP, SOLO, Paul–Elder, and cognitive-offloading research.
+              </p>
               <button
-                onClick={handleDemoFromHome}
-                className="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-10 py-3.5 rounded-xl text-sm transition-colors">
-                Run Demo
+                onClick={handleSampleFromHome}
+                className="bg-white text-black hover:bg-neutral-200 font-mono text-xs uppercase tracking-widest font-semibold px-10 py-3.5 transition-colors">
+                View sample report
               </button>
             </div>
           </div>
         )}
 
-
         {/* ── ANALYZE VIEW ────────────────────────────────────────── */}
         {view === 'analyze' && (
           <div className="space-y-6">
             <div>
-              <h1 className="text-2xl font-bold text-white">Analyze Conversation</h1>
-              <p className="text-sm text-gray-500 mt-1">
-                Paste a conversation transcript or run the demo to see cognitive pattern extraction.
+              <h1 className="font-display text-2xl font-bold text-white">Score a transcript</h1>
+              <p className="text-sm text-ink-2 mt-1">
+                Paste a conversation with an AI assistant. Scoring is rate-limited; transcripts are scored, not stored.
               </p>
             </div>
 
@@ -706,79 +733,111 @@ export default function App() {
               <textarea
                 value={conversation}
                 onChange={e => setConversation(e.target.value)}
-                placeholder="Paste a conversation transcript here...&#10;&#10;Format: User: ... / Assistant: ..."
-                className="w-full h-52 bg-gray-900 border border-gray-800 rounded-xl p-4 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-indigo-600 transition-colors font-mono"
+                placeholder={"Paste a conversation transcript here...\n\nFormat: User: ... / Assistant: ..."}
+                className="w-full h-52 bg-surface-2 border border-hairline p-4 font-mono text-sm text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-white transition-colors"
               />
 
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
                 <button
                   onClick={handleAnalyze}
-                  disabled={loading || !conversation.trim()}
-                  className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium px-5 py-2.5 rounded-lg transition-colors">
+                  disabled={loading || !conversation.trim() || overLimit}
+                  className="flex items-center gap-2 bg-white text-black hover:bg-neutral-200 disabled:opacity-40 disabled:cursor-not-allowed font-mono text-xs uppercase tracking-widest font-semibold px-6 py-3 transition-colors">
                   {loading && <Spinner />}
-                  {loading ? 'Analyzing...' : 'Analyze'}
+                  {loading ? 'Scoring…' : 'Score'}
                 </button>
 
                 <button
-                  onClick={handleDemo}
+                  onClick={handleSample}
                   disabled={loading}
-                  className="flex items-center gap-2 border border-gray-700 hover:border-gray-600 text-gray-300 hover:text-white text-sm px-5 py-2.5 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
-                  Demo
+                  className="border border-neutral-600 hover:border-white text-neutral-300 hover:text-white font-mono text-xs uppercase tracking-widest px-6 py-3 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                  Load sample
                 </button>
 
-                {sessions.length > 0 && (
-                  <span className="text-xs text-gray-600 ml-auto">
-                    {sessions.length} session{sessions.length !== 1 ? 's' : ''} stored
-                  </span>
-                )}
+                <span className={`font-mono text-[11px] ml-auto tabular-nums ${overLimit ? 'text-white font-semibold' : 'text-ink-3'}`}>
+                  {charCount.toLocaleString('en-US')} / {MAX_TRANSCRIPT_CHARS.toLocaleString('en-US')}
+                </span>
               </div>
+              {overLimit && (
+                <p className="font-mono text-[11px] text-neutral-300">
+                  Over the limit — trim the transcript to {MAX_TRANSCRIPT_CHARS.toLocaleString('en-US')} characters to score it.
+                </p>
+              )}
             </div>
 
             {/* Error */}
             {error && (
-              <div className="border border-red-500/30 bg-red-500/8 rounded-xl p-4 text-sm text-red-400">
-                {error}
+              <div className="border-l-2 border-white bg-surface-2 border-y border-r border-y-hairline border-r-hairline p-4">
+                <p className="font-mono text-[10px] uppercase tracking-widest text-ink-3 mb-1">Could not score</p>
+                <p className="text-sm text-neutral-200">{error}</p>
               </div>
             )}
 
-            {/* Results */}
+            {/* Report */}
             {result && !loading && (
-              <div className="space-y-5 animate-in" style={{ animation: 'fadeIn 0.3s ease' }}>
-                {/* Scores */}
-                <div className="bg-gray-900 border border-gray-800 rounded-xl p-6">
-                  <h2 className="text-xs text-gray-500 uppercase tracking-widest mb-5">Cognitive Scores</h2>
-                  <div className="flex flex-wrap justify-around gap-6">
-                    <CircularScore value={result.scores.criticalThinking} label="Critical Thinking" color="#6366f1" />
-                    <CircularScore value={result.scores.depth} label="Depth" color="#10b981" />
-                    <CircularScore value={result.scores.engagement} label="Engagement" color="#f59e0b" />
-                  </div>
+              <div className="space-y-5" style={{ animation: 'fadeIn 0.3s ease' }}>
+                <div className="flex items-baseline justify-between flex-wrap gap-2 border-t-2 border-white pt-4">
+                  <h2 className="font-mono text-[11px] uppercase tracking-[0.2em] text-white">
+                    {isSample ? 'Sample report' : 'Report'} — {result.conversation}
+                  </h2>
+                  <span className="font-mono text-[10px] text-ink-3">
+                    {isSample ? 'precomputed sample' : `scored ${new Date(result.timestamp).toLocaleString()}`}
+                  </span>
                 </div>
+
+                {/* Scores */}
+                <Panel>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-10 gap-y-7">
+                    <BandGauge value={result.scores.criticalThinking} label="Critical thinking" />
+                    <BandGauge value={result.scores.depth} label="Depth" />
+                    <BandGauge value={result.scores.engagement} label="Engagement" />
+                    {typeof result.offloadingRatio === 'number' && (
+                      <BandGauge value={result.offloadingRatio} label="Offloading ratio" showBand={false}
+                        sublabel="Lower is healthier — you stay in the reasoning loop" />
+                    )}
+                  </div>
+                </Panel>
 
                 {/* Summary */}
-                <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-                  <h2 className="text-xs text-gray-500 uppercase tracking-widest mb-3">Analysis Summary</h2>
-                  <p className="text-sm text-gray-300 leading-relaxed">{result.summary}</p>
-                </div>
+                <Panel>
+                  <SectionLabel>Summary</SectionLabel>
+                  <p className="text-sm text-neutral-200 leading-relaxed">{result.summary}</p>
+                </Panel>
 
                 {/* Claims */}
-                <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-                  <h2 className="text-xs text-gray-500 uppercase tracking-widest mb-3">Flagged Claims</h2>
-                  <div className="space-y-2">
-                    {result.claims.map((c, i) => <ClaimBadge key={i} claim={c} />)}
-                  </div>
-                </div>
+                {result.claims.length > 0 && (
+                  <Panel>
+                    <SectionLabel>Flagged claims</SectionLabel>
+                    <div className="space-y-2">
+                      {result.claims.map((c, i) => <ClaimBadge key={i} claim={c} />)}
+                    </div>
+                  </Panel>
+                )}
 
                 {/* Engagement signals */}
-                <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-                  <h2 className="text-xs text-gray-500 uppercase tracking-widest mb-3">Engagement Signals</h2>
-                  <ul className="space-y-1.5">
-                    {result.engagementSignals.map((s, i) => (
-                      <li key={i} className="flex items-start gap-2.5 text-sm text-gray-400">
-                        <span className="w-1 h-1 rounded-full bg-gray-600 mt-2 flex-shrink-0" />
-                        {s}
-                      </li>
-                    ))}
-                  </ul>
+                {result.engagementSignals.length > 0 && (
+                  <Panel>
+                    <SectionLabel>Observed signals</SectionLabel>
+                    <ul className="space-y-1.5">
+                      {result.engagementSignals.map((s, i) => (
+                        <li key={i} className="flex items-start gap-3 text-sm text-ink-2">
+                          <span className="font-mono text-ink-3 flex-shrink-0">—</span>
+                          {s}
+                        </li>
+                      ))}
+                    </ul>
+                  </Panel>
+                )}
+
+                {/* Actions */}
+                <div className="flex items-center gap-3 flex-wrap">
+                  <button
+                    onClick={handleDownload}
+                    className="border border-neutral-600 hover:border-white text-neutral-300 hover:text-white font-mono text-[11px] uppercase tracking-widest px-5 py-2.5 transition-colors">
+                    Download session JSON
+                  </button>
+                  <span className="text-xs text-ink-3">
+                    Works with the Cognify dashboard and the Claude Code skill's profile.
+                  </span>
                 </div>
               </div>
             )}
@@ -789,128 +848,141 @@ export default function App() {
         {view === 'profile' && (
           <div className="space-y-6">
             <div>
-              <h1 className="text-2xl font-bold text-white">Cognitive Profile</h1>
-              <p className="text-sm text-gray-500 mt-1">
-                Cumulative patterns across all sessions.
+              <h1 className="font-display text-2xl font-bold text-white">Profile</h1>
+              <p className="text-sm text-ink-2 mt-1">
+                Cumulative patterns across all sessions — stored locally in your browser.
               </p>
-              <label className="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer">
+              <label className="inline-block mt-2 font-mono text-[11px] uppercase tracking-widest text-ink-2 hover:text-white cursor-pointer border-b border-neutral-600 hover:border-white transition-colors">
                 Import profile.json
                 <input type="file" accept="application/json,.json" onChange={handleImport} className="hidden" />
               </label>
             </div>
 
+            {error && view === 'profile' && (
+              <div className="border-l-2 border-white bg-surface-2 p-4 text-sm text-neutral-200">{error}</div>
+            )}
+
             {!profile ? (
-              <div className="border border-gray-800 rounded-xl p-10 text-center">
-                <p className="text-gray-500 text-sm">No sessions yet.</p>
-                <p className="text-gray-600 text-xs mt-1">
-                  Run the Demo on the Analyze tab to populate your profile.
+              <div className="border border-hairline p-10 text-center">
+                <p className="text-ink-2 text-sm">No sessions yet.</p>
+                <p className="text-ink-3 text-xs mt-1">
+                  Score a transcript, load the sample, or import a profile.json from the Claude Code skill (~/.cognify).
                 </p>
               </div>
             ) : (
               <div className="space-y-5">
                 {/* Stats row */}
-                <div className="grid grid-cols-3 gap-4">
+                <div className="grid grid-cols-3 gap-px bg-hairline border border-hairline">
                   {[
                     { label: 'Sessions', value: profile.sessionCount },
-                    { label: 'Avg Critical Thinking', value: `${profile.avgCriticalThinking}/100` },
-                    { label: 'Avg Depth', value: `${profile.avgDepth}/100` },
+                    { label: 'Avg critical thinking', value: profile.avgCriticalThinking },
+                    { label: 'Avg depth', value: profile.avgDepth },
                   ].map(stat => (
-                    <div key={stat.label} className="bg-gray-900 border border-gray-800 rounded-xl p-4 text-center">
-                      <div className="text-2xl font-bold text-white">{stat.value}</div>
-                      <div className="text-xs text-gray-500 mt-1">{stat.label}</div>
+                    <div key={stat.label} className="bg-surface-2 p-4 text-center">
+                      <div className="font-mono text-3xl font-semibold text-white tabular-nums">{stat.value}</div>
+                      <div className="font-mono text-[10px] uppercase tracking-widest text-ink-3 mt-1">{stat.label}</div>
                     </div>
                   ))}
                 </div>
 
                 {profile.avgOffloadingRatio !== null && (
-                  <div className="mt-6">
-                    <h2 className="text-xs text-amber-400/80 uppercase tracking-widest mb-3">Cognitive Offloading Ratio</h2>
-                    <div className="flex items-center gap-4">
-                      <CircularScore value={profile.avgOffloadingRatio} label="Offloading" color="#f59e0b" />
-                      <p className="text-sm text-gray-400 max-w-xs">
-                        Share of cognitive work delegated to the AI vs. retained and verified. Lower is healthier —
-                        it means you stay in the reasoning loop.
-                      </p>
+                  <Panel>
+                    <div className="max-w-md">
+                      <BandGauge value={profile.avgOffloadingRatio} label="Avg offloading ratio" showBand={false}
+                        sublabel="Lower is healthier — you stay in the reasoning loop" />
                     </div>
-                  </div>
+                  </Panel>
                 )}
 
                 {/* Trend chart */}
-                <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-                  <h2 className="text-xs text-gray-500 uppercase tracking-widest mb-4">Score Trend</h2>
+                <Panel>
+                  <SectionLabel>Score trend</SectionLabel>
                   <TrendChart trend={profile.trend} />
-                </div>
+                </Panel>
 
                 {/* Topic map */}
-                <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-                  <h2 className="text-xs text-gray-500 uppercase tracking-widest mb-4">Topic Knowledge Map</h2>
+                <Panel>
+                  <SectionLabel>Topic map</SectionLabel>
                   <TopicMap topicFrequency={profile.topicFrequency} />
-                </div>
+                </Panel>
 
                 {/* Blindspots + Strengths */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div className="bg-gray-900 border border-red-500/20 rounded-xl p-5">
-                    <h2 className="text-xs text-red-500/80 uppercase tracking-widest mb-3">Blind Spots</h2>
+                  <Panel>
+                    <SectionLabel>▲ Blind spots</SectionLabel>
                     {profile.blindspots.length ? (
                       <div className="flex flex-wrap gap-2">
                         {profile.blindspots.map(b => (
-                          <span key={b} className="text-xs border border-red-500/30 text-red-400 rounded-full px-2.5 py-1">
+                          <span key={b} className="font-mono text-xs bg-white text-black px-2.5 py-1">
                             {b}
                           </span>
                         ))}
                       </div>
                     ) : (
-                      <p className="text-xs text-gray-600">None detected yet.</p>
+                      <p className="text-xs text-ink-3">None detected yet.</p>
                     )}
-                  </div>
-                  <div className="bg-gray-900 border border-emerald-500/20 rounded-xl p-5">
-                    <h2 className="text-xs text-emerald-500/80 uppercase tracking-widest mb-3">Strengths</h2>
+                  </Panel>
+                  <Panel>
+                    <SectionLabel>○ Strengths</SectionLabel>
                     {profile.strengths.length ? (
                       <div className="flex flex-wrap gap-2">
                         {profile.strengths.map(s => (
-                          <span key={s} className="text-xs border border-emerald-500/30 text-emerald-400 rounded-full px-2.5 py-1">
+                          <span key={s} className="font-mono text-xs border border-neutral-500 text-neutral-300 px-2.5 py-1">
                             {s}
                           </span>
                         ))}
                       </div>
                     ) : (
-                      <p className="text-xs text-gray-600">Not enough data yet.</p>
+                      <p className="text-xs text-ink-3">Not enough data yet.</p>
                     )}
-                  </div>
+                  </Panel>
                 </div>
 
                 {/* Fingerprint */}
-                <div className="bg-gray-900 border border-indigo-500/20 rounded-xl p-5">
-                  <h2 className="text-xs text-indigo-400/80 uppercase tracking-widest mb-3">Cognitive Fingerprint</h2>
-                  <p className="text-sm text-gray-300 leading-relaxed">{fingerprint}</p>
+                <div className="border-l-2 border-white bg-surface-2 border-y border-r border-y-hairline border-r-hairline p-5">
+                  <SectionLabel>Cognitive fingerprint</SectionLabel>
+                  <p className="text-sm text-neutral-200 leading-relaxed">{fingerprint}</p>
                 </div>
 
                 {/* Sessions list */}
-                <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
-                  <h2 className="text-xs text-gray-500 uppercase tracking-widest mb-4">Session History</h2>
-                  <div className="space-y-3">
-                    {[...sessions].reverse().map((s, i) => (
-                      <div key={s.id} className="border border-gray-800 rounded-lg p-3 flex items-center gap-4">
-                        <div className="text-xs text-gray-600 font-mono w-20 flex-shrink-0">
+                <Panel>
+                  <SectionLabel>Session history</SectionLabel>
+                  <div className="divide-y divide-hairline">
+                    {[...sessions].reverse().map((s) => (
+                      <div key={s.id} className="py-3 flex items-center gap-4">
+                        <div className="font-mono text-[11px] text-ink-3 w-16 flex-shrink-0">
                           {new Date(s.timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                         </div>
                         <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-3">
-                            <span className="text-xs text-indigo-400">{s.scores.criticalThinking} CT</span>
-                            <span className="text-xs text-emerald-400">{s.scores.depth} depth</span>
-                            <span className="text-xs text-yellow-500/70">{s.scores.engagement} eng</span>
+                          <div className="flex items-center gap-4 font-mono text-[11px] tabular-nums">
+                            <span className="text-white">CT {s.scores.criticalThinking}</span>
+                            <span className="text-neutral-400">DP {s.scores.depth}</span>
+                            <span className="text-neutral-400">EN {s.scores.engagement}</span>
+                            {typeof s.offloadingRatio === 'number' && (
+                              <span className="text-ink-3">OFF {s.offloadingRatio}</span>
+                            )}
                           </div>
-                          <p className="text-xs text-gray-600 mt-0.5 truncate">{s.summary || s.conversation}</p>
+                          <p className="text-xs text-ink-3 mt-0.5 truncate">{s.summary || s.conversation}</p>
                         </div>
                       </div>
                     ))}
                   </div>
-                </div>
+                </Panel>
               </div>
             )}
           </div>
         )}
       </main>
+
+      <footer className="border-t border-hairline mt-8 px-6 py-6 max-w-4xl mx-auto w-full flex items-center justify-between flex-wrap gap-2">
+        <span className="font-mono text-[10px] uppercase tracking-widest text-ink-3">
+          Cognify · open source · rubric v1.0
+        </span>
+        <a href="https://github.com/krisparashkevov17/cognify" target="_blank" rel="noreferrer"
+          className="font-mono text-[10px] uppercase tracking-widest text-ink-3 hover:text-white transition-colors">
+          GitHub ↗
+        </a>
+      </footer>
 
       <style>{`
         @keyframes fadeIn {

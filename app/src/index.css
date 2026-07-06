@@ -2,13 +2,23 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Cognify — monochrome instrument. Ink on black; inversion is the only accent. */
+:root {
+  --ink: #ffffff;
+  --ink-2: #a3a3a3;
+  --ink-3: #666666;
+  --hairline: #262626;
+  --surface: #0a0a0a;
+  --surface-2: #111111;
+}
+
 * {
   box-sizing: border-box;
 }
 
 body {
-  background-color: #030712;
-  color: #f9fafb;
+  background-color: var(--surface);
+  color: var(--ink);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
@@ -17,13 +27,26 @@ textarea {
   resize: vertical;
 }
 
+::selection {
+  background: #ffffff;
+  color: #000000;
+}
+
 ::-webkit-scrollbar {
   width: 4px;
 }
 ::-webkit-scrollbar-track {
-  background: #111827;
+  background: #0a0a0a;
 }
 ::-webkit-scrollbar-thumb {
-  background: #374151;
-  border-radius: 2px;
+  background: #333333;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
 }
