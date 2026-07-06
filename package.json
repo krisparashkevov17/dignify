@@ -1,0 +1,14 @@
+{
+  "name": "cognify-root",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Cognify — public transcript analyzer API + skill store (dashboard lives in app/)",
+  "scripts": {
+    "test": "node --test skill/scripts/cognify-store.test.mjs api/_lib/analyzer.test.mjs api/analyze.test.mjs",
+    "build": "cd app && npm install && npm run build"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.93.0"
+  }
+}
