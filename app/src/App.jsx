@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 
 // ─── SAMPLE CONTENT ──────────────────────────────────────────────────────
 // The sample report is precomputed so it renders instantly, costs nothing,
@@ -264,7 +264,7 @@ function bandFor(value) {
 
 // Signature element: a score shown as its position on the five-band rubric
 // ladder. Each cell fills to the extent the score covers it (2px gaps between
-// cells; monochrome fill).
+// cells; monochrome fill; fills settle left-to-right like a meter powering up).
 function BandGauge({ value, label, sublabel, showBand = true }) {
   const v = Math.min(100, Math.max(0, value));
   return (
@@ -278,10 +278,15 @@ function BandGauge({ value, label, sublabel, showBand = true }) {
           const lo = i * 20;
           const fillPct = Math.min(1, Math.max(0, (v - lo) / 20));
           return (
-            <div key={b.label} className="flex-1 h-2 bg-[#1c1c1c] overflow-hidden">
+            <div key={b.label} className="flex-1 h-2 bg-[#1c1c1c] overflow-hidden"
+              title={showBand ? `${b.label} · ${lo + 1}–${b.max}` : `${lo + 1}–${b.max}`}>
               <div
                 className="h-full bg-white"
-                style={{ width: `${fillPct * 100}%`, transition: 'width 0.7s ease' }}
+                style={{
+                  width: `${fillPct * 100}%`,
+                  transition: 'width 0.5s ease',
+                  transitionDelay: `${i * 90}ms`,
+                }}
               />
             </div>
           );
@@ -289,6 +294,71 @@ function BandGauge({ value, label, sublabel, showBand = true }) {
       </div>
       <div className="mt-1.5 font-mono text-[10px] uppercase tracking-widest text-ink-3">
         {showBand ? bandFor(v).label : sublabel}
+      </div>
+    </div>
+  );
+}
+
+// Tiny monochrome sparkline for stat tiles — the last N values, drawn flat.
+function Sparkline({ values, width = 88, height = 20 }) {
+  if (!values || values.length < 2) return null;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const xAt = (i) => (i / (values.length - 1)) * (width - 4) + 2;
+  const yAt = (v) => height - 3 - ((v - min) / span) * (height - 6);
+  const d = values.map((v, i) => `${i === 0 ? 'M' : 'L'}${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`).join(' ');
+  const lastX = xAt(values.length - 1);
+  const lastY = yAt(values[values.length - 1]);
+  return (
+    <svg width={width} height={height} className="mx-auto block" aria-hidden="true">
+      <path d={d} fill="none" stroke="#525252" strokeWidth="1.5"
+        strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx={lastX} cy={lastY} r="2" fill="#ffffff" />
+    </svg>
+  );
+}
+
+// Ambient hero visualization: a calibration strip. Tick marks, a measured
+// waveform that draws itself in, and a scan line sweeping the strip — the
+// instrument is always measuring. Pure SVG + CSS; halts under reduced motion.
+function HeroTrace() {
+  const W = 800;
+  const H = 72;
+  const MID = 44;
+  // A fixed, hand-tuned "reading": noisy start, structured finish.
+  const pts = [
+    [0, 10], [40, -6], [80, 14], [120, -12], [160, 8], [200, -16], [240, 18],
+    [280, -8], [320, 4], [360, -20], [400, 12], [440, -4], [480, -14], [520, 6],
+    [560, -10], [600, 2], [640, -6], [680, 1], [720, -3], [760, 0], [800, -1],
+  ];
+  const d = pts.map(([x, y], i) => `${i === 0 ? 'M' : 'L'}${x},${MID + y}`).join(' ');
+  return (
+    <div className="mt-14 select-none" aria-hidden="true">
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full block" style={{ height: '72px' }}>
+        {/* baseline + ticks */}
+        <line x1="0" y1={MID} x2={W} y2={MID} stroke="#1c1c1c" strokeWidth="1" />
+        {Array.from({ length: 41 }, (_, i) => {
+          const x = (i / 40) * W;
+          const major = i % 5 === 0;
+          return (
+            <line key={i} x1={x} y1={H - (major ? 12 : 7)} x2={x} y2={H}
+              stroke={major ? '#333333' : '#1c1c1c'} strokeWidth="1" />
+          );
+        })}
+        {/* the measured trace, drawing itself */}
+        <path d={d} fill="none" stroke="#8a8a8a" strokeWidth="1.5"
+          strokeLinecap="round" strokeLinejoin="round"
+          pathLength="1" className="hero-trace-path" />
+        {/* scan line */}
+        <g className="hero-trace-scan">
+          <line x1="0" y1="4" x2="0" y2={H - 14} stroke="#ffffff" strokeWidth="1" />
+          <line x1="0" y1="4" x2="0" y2={H - 14} stroke="#ffffff" strokeWidth="7" opacity="0.06" />
+        </g>
+      </svg>
+      <div className="flex justify-between font-mono text-[9px] uppercase tracking-widest text-ink-3 mt-1">
+        <span>signal: user contribution</span>
+        <span>continuous measurement</span>
       </div>
     </div>
   );
@@ -318,6 +388,9 @@ function ClaimBadge({ claim }) {
 }
 
 function TrendChart({ trend }) {
+  const svgRef = useRef(null);
+  const [hoverIdx, setHoverIdx] = useState(null);
+
   if (!trend || trend.length < 2) {
     return (
       <div className="h-36 flex items-center justify-center text-ink-3 text-sm">
@@ -342,13 +415,40 @@ function TrendChart({ trend }) {
   const pathFor = (key) =>
     trend.map((t, i) => `${i === 0 ? 'M' : 'L'}${xAt(i).toFixed(1)},${yAt(t[key]).toFixed(1)}`).join(' ');
 
+  // Area fill under the primary series, closed to the plot floor.
+  const areaD = `${pathFor('criticalThinking')} L${xAt(trend.length - 1).toFixed(1)},${(PAD.top + innerH).toFixed(1)} L${xAt(0).toFixed(1)},${(PAD.top + innerH).toFixed(1)} Z`;
+
   const last = trend[trend.length - 1];
+
+  // Pointer events cover mouse and touch alike — hover is not the only channel.
+  const handlePointer = (e) => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    const px = ((e.clientX - rect.left) / rect.width) * W;
+    const frac = (px - PAD.left) / innerW;
+    const idx = Math.round(frac * (trend.length - 1));
+    setHoverIdx(Math.min(trend.length - 1, Math.max(0, idx)));
+  };
+
+  const hover = hoverIdx !== null ? trend[hoverIdx] : null;
+  // Readout box flips sides near the right edge so it never clips.
+  const boxW = 108;
+  const boxX = hover ? (xAt(hoverIdx) + boxW + 12 > W - PAD.right + 100 ? xAt(hoverIdx) - boxW - 8 : xAt(hoverIdx) + 8) : 0;
 
   // Two series in monochrome: identity by line pattern (solid vs dashed) plus
   // direct end labels — never color alone.
   return (
     <div className="w-full">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: '150px' }}>
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${W} ${H}`}
+        className="w-full cursor-crosshair"
+        style={{ height: '150px', touchAction: 'pan-y' }}
+        onPointerMove={handlePointer}
+        onPointerDown={handlePointer}
+        onPointerLeave={() => setHoverIdx(null)}
+      >
         {[25, 50, 75].map(v => (
           (v >= minV && v <= maxV) && (
             <React.Fragment key={v}>
@@ -361,19 +461,18 @@ function TrendChart({ trend }) {
             </React.Fragment>
           )
         ))}
+        <path d={areaD} fill="#ffffff" fillOpacity="0.045" stroke="none" />
         <path d={pathFor('criticalThinking')} fill="none" stroke="#ffffff" strokeWidth="2"
           strokeLinecap="round" strokeLinejoin="round" />
         <path d={pathFor('depth')} fill="none" stroke="#8a8a8a" strokeWidth="2" strokeDasharray="5 4"
           strokeLinecap="round" strokeLinejoin="round" />
         {trend.map((t, i) => (
           <React.Fragment key={i}>
-            <circle cx={xAt(i)} cy={yAt(t.criticalThinking)} r="3" fill="#ffffff">
-              <title>{`${t.date} — critical thinking ${t.criticalThinking}`}</title>
-            </circle>
-            <circle cx={xAt(i)} cy={yAt(t.depth)} r="3" fill="#0a0a0a" stroke="#8a8a8a" strokeWidth="1.5">
-              <title>{`${t.date} — depth ${t.depth}`}</title>
-            </circle>
-            <text x={xAt(i)} y={H - 6} textAnchor="middle" fill="#525252" fontSize="9"
+            <circle cx={xAt(i)} cy={yAt(t.criticalThinking)} r={hoverIdx === i ? 4 : 3} fill="#ffffff" />
+            <circle cx={xAt(i)} cy={yAt(t.depth)} r={hoverIdx === i ? 4 : 3} fill="#0a0a0a"
+              stroke="#8a8a8a" strokeWidth="1.5" />
+            <text x={xAt(i)} y={H - 6} textAnchor="middle"
+              fill={hoverIdx === i ? '#a3a3a3' : '#525252'} fontSize="9"
               fontFamily="IBM Plex Mono, monospace">
               {t.date}
             </text>
@@ -383,6 +482,21 @@ function TrendChart({ trend }) {
           fontFamily="IBM Plex Mono, monospace">CRITICAL THINKING</text>
         <text x={W - PAD.right + 8} y={yAt(last.depth) + 3} fill="#8a8a8a" fontSize="9"
           fontFamily="IBM Plex Mono, monospace">DEPTH</text>
+
+        {/* crosshair + readout */}
+        {hover && (
+          <g pointerEvents="none">
+            <line x1={xAt(hoverIdx)} x2={xAt(hoverIdx)} y1={PAD.top} y2={PAD.top + innerH}
+              stroke="#ffffff" strokeWidth="1" strokeDasharray="2 3" opacity="0.5" />
+            <rect x={boxX} y={PAD.top} width={boxW} height="42" fill="#0a0a0a" stroke="#333333" strokeWidth="1" />
+            <text x={boxX + 8} y={PAD.top + 13} fill="#666666" fontSize="8.5"
+              fontFamily="IBM Plex Mono, monospace" style={{ textTransform: 'uppercase' }}>{hover.date}</text>
+            <text x={boxX + 8} y={PAD.top + 25} fill="#ffffff" fontSize="9"
+              fontFamily="IBM Plex Mono, monospace">CT {hover.criticalThinking}</text>
+            <text x={boxX + 8} y={PAD.top + 37} fill="#8a8a8a" fontSize="9"
+              fontFamily="IBM Plex Mono, monospace">DP {hover.depth}</text>
+          </g>
+        )}
       </svg>
       <div className="flex gap-6 mt-1 font-mono text-[10px] uppercase tracking-widest text-ink-3">
         <span className="flex items-center gap-2">
@@ -622,6 +736,7 @@ export default function App() {
                   View sample report
                 </button>
               </div>
+              <HeroTrace />
             </div>
 
             {/* What it measures — the real gauges */}
@@ -874,13 +989,16 @@ export default function App() {
                 {/* Stats row */}
                 <div className="grid grid-cols-3 gap-px bg-hairline border border-hairline">
                   {[
-                    { label: 'Sessions', value: profile.sessionCount },
-                    { label: 'Avg critical thinking', value: profile.avgCriticalThinking },
-                    { label: 'Avg depth', value: profile.avgDepth },
+                    { label: 'Sessions', value: profile.sessionCount, spark: null },
+                    { label: 'Avg critical thinking', value: profile.avgCriticalThinking, spark: profile.trend.map(t => t.criticalThinking) },
+                    { label: 'Avg depth', value: profile.avgDepth, spark: profile.trend.map(t => t.depth) },
                   ].map(stat => (
                     <div key={stat.label} className="bg-surface-2 p-4 text-center">
                       <div className="font-mono text-3xl font-semibold text-white tabular-nums">{stat.value}</div>
-                      <div className="font-mono text-[10px] uppercase tracking-widest text-ink-3 mt-1">{stat.label}</div>
+                      <div className="h-5 mt-1 flex items-center justify-center">
+                        {stat.spark && <Sparkline values={stat.spark} />}
+                      </div>
+                      <div className="font-mono text-[10px] uppercase tracking-widest text-ink-3 mt-0.5">{stat.label}</div>
                     </div>
                   ))}
                 </div>
@@ -988,6 +1106,25 @@ export default function App() {
         @keyframes fadeIn {
           from { opacity: 0; transform: translateY(8px); }
           to   { opacity: 1; transform: translateY(0); }
+        }
+        .hero-trace-path {
+          stroke-dasharray: 1;
+          stroke-dashoffset: 1;
+          animation: traceDraw 5.5s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+        }
+        .hero-trace-scan {
+          animation: scanSweep 9s linear infinite;
+        }
+        @keyframes traceDraw {
+          to { stroke-dashoffset: 0; }
+        }
+        @keyframes scanSweep {
+          from { transform: translateX(0); }
+          to   { transform: translateX(800px); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .hero-trace-path { stroke-dashoffset: 0; }
+          .hero-trace-scan { display: none; }
         }
       `}</style>
     </div>

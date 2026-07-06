@@ -32,6 +32,11 @@ textarea {
   color: #000000;
 }
 
+:focus-visible {
+  outline: 1px solid #ffffff;
+  outline-offset: 2px;
+}
+
 ::-webkit-scrollbar {
   width: 4px;
 }
