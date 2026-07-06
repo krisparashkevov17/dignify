@@ -47,6 +47,37 @@ Ask Claude **"score my thinking"** at the end of any conversation and you get an
 Then open the **dashboard** to see the longitudinal picture: trends, your cognitive fingerprint,
 recurring blind spots, strengths, and your offloading ratio over time.
 
+## The public analyzer
+
+Cognify is also a **public web tool**: paste any AI conversation transcript and get the same
+science-grounded report in your browser — four scores on the five-band rubric ladder, claims
+flagged by epistemic risk, and a downloadable session you can import into the dashboard.
+No sign-up. Rate-limited. The API key never leaves the server.
+
+**Deploy your own in ~2 minutes (Vercel):**
+
+```bash
+npm i -g vercel
+vercel                       # from the repo root — build config is in vercel.json
+vercel env add ANTHROPIC_API_KEY   # paste your key from platform.claude.com
+vercel --prod
+```
+
+Configuration (see [`.env.example`](.env.example)):
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | — | Required for live scoring. Without it the site still works in sample mode. |
+| `ANALYZER_MODEL` | `claude-opus-4-8` | Set `claude-haiku-4-5` for a ~5× cheaper public deployment. |
+| `ANALYZER_RATE_LIMIT` | `10` | Scorings per IP per hour (best-effort, per warm instance). |
+
+Abuse controls are honest, not theatrical: per-IP rate limiting is in-memory per serverless
+instance (documented, not pretended-global), transcripts are capped at 24k characters, output
+tokens are bounded, and transcripts are scored — never stored.
+
+**Local dev:** `vercel dev` at the repo root serves the API on `:3000`; `cd app && npm run dev`
+serves the UI with a proxy to it.
+
 ## Features
 
 | | |
@@ -101,8 +132,9 @@ Everything stays on your machine. Cognify stores **labels + scores + signals** i
 
 - ✅ **v1** — on-demand skill + local profile + dashboard
 - ✅ **Phase 2** — auto-score on session end via a `SessionEnd` hook ([`skill/hooks/`](skill/hooks/cognify-autoscore.md))
+- ✅ **Relaunch** — public web analyzer: paste a transcript, get a report (`app/` + `api/`)
 - 🔜 **Phase 3** — claude.ai Skills wrapper (reuses `SKILL.md` + `schema.json`)
-- 🔭 **Phase 4** — hosted backend + accounts, and a research arm studying how AI shapes thinking,
+- 🔭 **Phase 4** — hosted accounts and a research arm studying how AI shapes thinking,
   built on Cognify's unique behavioral, longitudinal dataset
 
 ## Repository layout
@@ -111,15 +143,22 @@ Everything stays on your machine. Cognify stores **labels + scores + signals** i
 cognify/
 ├── skill/        # the Claude skill: SKILL.md, store script, schema + science
 │   └── hooks/    # Phase-2 auto-scoring: SessionEnd hook + guide
-├── app/          # the React dashboard (trends, fingerprint, offloading)
+├── app/          # React web app: public analyzer + local dashboard
+├── api/          # serverless scoring endpoint (Anthropic SDK, rate-limited)
+│   └── _lib/     # dependency-free analyzer core (prompt, schema, validation)
 └── *.html        # showcase: pitch, slides, demo, explainer
 ```
+
+Everything shares one contract: [`skill/reference/schema.json`](skill/reference/schema.json).
+A session scored on the website downloads as the same JSON the Claude Code skill writes to
+`~/.cognify/profile.json`, and both import into the dashboard.
 
 ## Development
 
 ```bash
-node --test 'skill/scripts/*.test.mjs'   # store unit tests
-cd app && npm run build                    # dashboard build
+npm install     # root: Anthropic SDK for the API function
+npm test        # store + analyzer + API handler tests (node:test, no framework)
+npm run build   # dashboard/analyzer build (Vite)
 ```
 
 ## License
